@@ -1,0 +1,100 @@
+# sync-upstream.yml
+#
+# Keep this fork in sync with upstream mattpocock/skills, while preserving
+# the CodeBuddy-specific flat skills structure:
+#
+#   upstream:  skills/<category>/<name>/SKILL.md   (nested)
+#   this fork: skills/<name>/SKILL.md             (flat, CodeBuddy compatible)
+#
+# Strategy: reset workspace to upstream/main, restore this fork's adaptation
+# layer (.codebuddy-plugin + this workflow), flatten skills, then force-push.
+# This intentionally force-pushes the fork's main branch — safe because this
+# fork is a personal sync target with no external collaborators.
+name: Sync upstream
+
+on:
+  schedule:
+    - cron: "0 2 * * *" # 每天 02:00 UTC (10:00 北京时间)
+  workflow_dispatch: # 支持手动触发
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/mattpocock/skills.git
+          git fetch upstream main
+
+      - name: Rebuild from upstream + flatten
+        run: |
+          set -euo pipefail
+
+          # 1) Save this fork's adaptation layer (not present upstream):
+          #    .codebuddy-plugin/ manifests and this workflow file itself.
+          mkdir -p /tmp/cb
+          cp -r .codebuddy-plugin /tmp/cb/ 2>/dev/null || true
+          mkdir -p /tmp/cb/workflows
+          cp -r .github/workflows/sync-upstream.yml /tmp/cb/workflows/ 2>/dev/null || true
+
+          # 2) Reset workspace to latest upstream
+          git reset --hard upstream/main
+
+          # 3) Restore the adaptation layer
+          mkdir -p .codebuddy-plugin .github/workflows
+          cp -r /tmp/cb/.codebuddy-plugin/. .codebuddy-plugin/ 2>/dev/null || true
+          cp -r /tmp/cb/workflows/sync-upstream.yml .github/workflows/ 2>/dev/null || true
+
+          # 3b) Drop upstream's release.yml. It would otherwise end up in the
+          #     commit, and pushing changes under .github/workflows/ requires
+          #     workflows permission that GITHUB_TOKEN does not have.
+          rm -f .github/workflows/release.yml
+
+          # 4) Flatten skills: skills/<category>/<name>/ -> skills/<name>/
+          cd skills
+          for cat in */; do
+            cat="${cat%/}"
+            [ -d "$cat" ] || continue
+            # category dirs have no SKILL.md of their own
+            [ -f "$cat/SKILL.md" ] && continue
+            for skill in "$cat"/*/; do
+              [ -d "$skill" ] || continue
+              name="$(basename "$skill")"
+              [ -f "$skill/SKILL.md" ] || continue
+              if [ -e "$name" ]; then
+                echo "WARN: skip $name (target already exists)"
+                continue
+              fi
+              echo "  promote $cat/$name -> $name"
+              mv "$skill" "$name"
+            done
+            # category dirs only carry README.md — drop them entirely
+            echo "  removing leftover category dir: $cat"
+            rm -rf "$cat"
+          done
+          # drop stale category dirs that upstream keeps but we don't ship
+          rm -rf deprecated in-progress misc
+          cd ..
+
+          # 5) Commit & force-push (fork's main is a sync target, no external
+          #    collaborators, so force-push is safe and keeps history linear)
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes — already up to date"
+          else
+            git -c user.name="GitHub Action" -c user.email="actions@github.com" \
+              commit -m "chore: sync from mattpocock/skills (flattened for CodeBuddy)"
+            git push --force origin main
+          fi
