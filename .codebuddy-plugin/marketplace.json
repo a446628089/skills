@@ -1,0 +1,20 @@
+{
+  "name": "mattpocock-skills",
+  "description": "Matt Pocock's skills for real engineering, as an installable CodeBuddy plugin.",
+  "owner": {
+    "name": "Matt Pocock",
+    "email": "hello@aihero.dev"
+  },
+  "plugins": [
+    {
+      "name": "mattpocock-skills",
+      "description": "Matt Pocock's agent skills for real engineering — grilling, spec/ticket flows, TDD, code review, domain modelling and more.",
+      "version": "1.2.1",
+      "source": "./",
+      "author": {
+        "name": "Matt Pocock",
+        "email": "hello@aihero.dev"
+      }
+    }
+  ]
+}
