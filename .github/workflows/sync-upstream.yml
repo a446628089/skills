@@ -1,0 +1,113 @@
+# sync-upstream.yml
+#
+# Keep this fork in sync with upstream mattpocock/skills, while preserving
+# the CodeBuddy-specific flat skills structure:
+#
+#   upstream:  skills/<category>/<name>/SKILL.md   (nested)
+#   this fork: skills/<name>/SKILL.md             (flat, CodeBuddy compatible)
+#
+# Strategy: reset workspace to upstream/main, restore this fork's adaptation
+# layer (.codebuddy-plugin + all fork workflows), flatten skills, then force-push.
+# This intentionally force-pushes the fork's main branch, safe because this
+# fork is a personal sync target with no external collaborators.
+name: Sync upstream
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/sync-upstream.yml
+  schedule:
+    - cron: "0 2 * * *" # 每天 02:00 UTC (10:00 北京时间)
+  workflow_dispatch: # 支持手动触发
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/mattpocock/skills.git
+          git fetch upstream main
+
+      - name: Rebuild from upstream + flatten
+        run: |
+          set -euo pipefail
+
+          fork_head="$(git rev-parse HEAD)"
+          backup_dir="$(mktemp -d)"
+          trap 'rm -rf "$backup_dir"' EXIT
+
+          # 1) Save this fork's adaptation layer (not present upstream):
+          #    .codebuddy-plugin/ manifests and all of this fork's workflows.
+          if [ -d .codebuddy-plugin ]; then
+            cp -a .codebuddy-plugin "$backup_dir/"
+          fi
+          cp -a .github/workflows "$backup_dir/workflows"
+
+          # 2) Reset workspace to latest upstream
+          git reset --hard upstream/main
+
+          # 3) Restore the adaptation layer
+          if [ -d "$backup_dir/.codebuddy-plugin" ]; then
+            mkdir -p .codebuddy-plugin
+            cp -a "$backup_dir/.codebuddy-plugin/." .codebuddy-plugin/
+          fi
+
+          # GITHUB_TOKEN cannot push workflow changes. Replace the entire
+          # upstream workflow directory with the fork's original directory,
+          # so new upstream workflows cannot break future syncs.
+          rm -rf .github/workflows
+          mkdir -p .github
+          cp -a "$backup_dir/workflows" .github/workflows
+
+          # 4) Flatten skills: skills/<category>/<name>/ -> skills/<name>/
+          cd skills
+          for cat in */; do
+            cat="${cat%/}"
+            [ -d "$cat" ] || continue
+            # category dirs have no SKILL.md of their own
+            [ -f "$cat/SKILL.md" ] && continue
+            for skill in "$cat"/*/; do
+              [ -d "$skill" ] || continue
+              name="$(basename "$skill")"
+              [ -f "$skill/SKILL.md" ] || continue
+              if [ -e "$name" ]; then
+                echo "WARN: skip $name (target already exists)"
+                continue
+              fi
+              echo "  promote $cat/$name -> $name"
+              mv "$skill" "$name"
+            done
+            # category dirs only carry README.md — drop them entirely
+            echo "  removing leftover category dir: $cat"
+            rm -rf "$cat"
+          done
+          # drop stale category dirs that upstream keeps but we don't ship
+          rm -rf deprecated in-progress misc
+          cd ..
+
+          # 5) Compare against the fork, not the upstream reset point, so an
+          #    unchanged transformed tree does not create another sync commit.
+          git add -A
+          if git diff --cached --quiet "$fork_head" --; then
+            echo "No changes: already up to date"
+            git reset --hard "$fork_head"
+          else
+            git -c user.name="GitHub Action" -c user.email="actions@github.com" \
+              commit -m "chore: sync from mattpocock/skills (flattened for CodeBuddy)"
+            # Reject a concurrent edit instead of overwriting it.
+            git push --force-with-lease="refs/heads/main:$fork_head" origin HEAD:main
+          fi
